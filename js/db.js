@@ -1,0 +1,635 @@
+/* db.js — Database abstraction with complete student methods, device tracking, and messaging */
+'use strict';
+
+const DB = (() => {
+  const fb = () => window._db;
+  const k  = s => String(s).replace(/[.#$[\]/]/g, '_');
+
+  /* ══ Helpers ══ */
+  const normalizeCourseCode = (code) => {
+    return String(code || '').toUpperCase().replace(/\s/g, '');
+  };
+
+  const getCourseKey = (lecId, code, year, semester) => {
+    const cleanLecId = k(lecId);
+    const cleanCode = normalizeCourseCode(code);
+    return `${cleanLecId}_${cleanCode}_${year}_${semester}`;
+  };
+
+  const getCurrentAcademicPeriod = () => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = now.getMonth();
+    let semester = 1;
+    if (month >= 1 && month <= 6) semester = 2;
+    return { year, semester };
+  };
+
+  /* ══ Firebase operations ══ */
+  const fbGet    = async p => { const s = await fb().ref(p).once('value'); return s.val() ?? null; };
+  const fbSet    = (p, v)  => fb().ref(p).set(v);
+  const fbUpdate = (p, v)  => fb().ref(p).update(v);
+  const fbRemove = p       => fb().ref(p).remove();
+  const fbPush   = (p, v)  => fb().ref(p).push(v);
+  const fbListen = (p, cb) => { const ref=fb().ref(p),fn=s=>cb(s.val()); ref.on('value',fn); return ()=>ref.off('value',fn); };
+
+  /* ══ Demo store (for when Firebase is not configured) ══ */
+  const LS = 'ugqr7_store';
+  let _bc = null;
+  const load    = () => { try{return JSON.parse(localStorage.getItem(LS)||'{}');}catch{return {};} };
+  const save    = s => localStorage.setItem(LS, JSON.stringify(s));
+  const getBC   = () => { if(!_bc&&typeof BroadcastChannel!=='undefined')_bc=new BroadcastChannel('ugqr7'); return _bc; };
+  const bcast   = top => { try{getBC()?.postMessage({top,t:Date.now()});}catch{} };
+  const demoGet = p => { const parts=p.replace(/^\//,'').split('/'); let n=load(); for(const x of parts){if(n==null)return null;n=n[x];} return n??null; };
+  const demoSet = (p,v) => { const parts=p.replace(/^\//,'').split('/'),s=load(); let n=s; for(let i=0;i<parts.length-1;i++){if(!n[parts[i]]||typeof n[parts[i]]!=='object')n[parts[i]]={};n=n[parts[i]];} n[parts[parts.length-1]]=v; save(s);bcast(parts[0]); };
+  const demoMerge  = (p,v) => demoSet(p,Object.assign({},demoGet(p)||{},v));
+  const demoRemove = p => { const parts=p.replace(/^\//,'').split('/'),s=load(); let n=s; for(let i=0;i<parts.length-1;i++){if(!n[parts[i]])return;n=n[parts[i]];} delete n[parts[parts.length-1]];save(s);bcast(parts[0]); };
+  const demoPush   = (p,v) => { const id='k'+Date.now().toString(36)+Math.random().toString(36).slice(2,5); demoSet(`${p}/${id}`,{...v,_k:id});return id; };
+  const demoListen = (p,cb) => { cb(demoGet(p)); const top=p.split('/')[0],onMsg=e=>{if(e.data?.top===top)cb(demoGet(p));}; try{getBC()?.addEventListener('message',onMsg);}catch{} const timer=setInterval(()=>cb(demoGet(p)),1500); return()=>{clearInterval(timer);try{getBC()?.removeEventListener('message',onMsg);}catch{}}; };
+
+  /* ══ Unified API (switches between Firebase and demo) ══ */
+  const get    = p     => fb()?fbGet(p)     :Promise.resolve(demoGet(p));
+  const set    = (p,v) => fb()?fbSet(p,v)   :Promise.resolve(demoSet(p,v));
+  const update = (p,v) => fb()?fbUpdate(p,v):Promise.resolve(demoMerge(p,v));
+  const remove = p     => fb()?fbRemove(p)  :Promise.resolve(demoRemove(p));
+  const push   = (p,v) => fb()?fbPush(p,v)  :Promise.resolve(demoPush(p,v));
+  const arr    = async p => { const v=await get(p); return v&&typeof v==='object'?Object.values(v):[]; };
+  const listen = (p,cb) => fb()?fbListen(p,cb):demoListen(p,cb);
+
+  /* ══ SUPER ADMIN ══ */
+  const SA = {
+    get:    ()    => get('sa'),
+    exists: async () => !!(await get('sa/id')),
+    set:    d     => set('sa',d),
+    update: d     => update('sa',d),
+  };
+
+  /* ══ CO-ADMIN ══ */
+  const CA = {
+    getAll:  ()          => arr('cas'),
+    get:     uid         => get(`cas/${uid}`),
+    set:     (uid,d)     => set(`cas/${uid}`,d),
+    update:  (uid,d)     => update(`cas/${uid}`,d),
+    delete:  uid         => remove(`cas/${uid}`),
+    byEmail: async e     => { const a=await arr('cas');return a.find(c=>c.email===e)||null; },
+  };
+
+  /* ══ LECTURER ══ */
+  const LEC = {
+    getAll:  ()          => arr('lecs'),
+    get:     uid         => get(`lecs/${uid}`),
+    set:     (uid,d)     => set(`lecs/${uid}`,d),
+    update:  (uid,d)     => update(`lecs/${uid}`,d),
+    delete:  uid         => remove(`lecs/${uid}`),
+    byEmail: async e     => { const a=await arr('lecs');return a.find(l=>l.email===e)||null; },
+  };
+
+  /* ══ TEACHING ASSISTANT ══ */
+  const TA = {
+    getAll:       ()         => arr('tas'),
+    get:          uid        => get(`tas/${uid}`),
+    set:          (uid,d)    => set(`tas/${uid}`,d),
+    update:       (uid,d)    => update(`tas/${uid}`,d),
+    delete:       uid        => remove(`tas/${uid}`),
+    byEmail:      async e    => { const a=await arr('tas');return a.find(t=>t.email===e)||null; },
+    setInvite:    (key,d)    => set(`taInvites/${k(key)}`,d),
+    updateInvite: (key,d)    => update(`taInvites/${k(key)}`,d),
+    inviteByCode: async code => { const all=await get('taInvites');if(!all)return null;return Object.entries(all).find(([,v])=>v.code===code)||null; },
+  };
+
+  /* ══ UNIQUE IDS ══ */
+  const UID = {
+    getAll:  ()         => arr('uids'),
+    get:     id         => get(`uids/${k(id)}`),
+    set:     (id,d)     => set(`uids/${k(id)}`,d),
+    update:  (id,d)     => update(`uids/${k(id)}`,d),
+    byLecturerEmail: async (email) => {
+      const all = await arr('uids');
+      return all.filter(u => u.assignedTo === email);
+    },
+  };
+
+  /* ══ STUDENT ENROLLMENT ══ */
+  const ENROLLMENT = {
+    enroll: async (studentId, lecId, courseCode, courseName, semester, year) => {
+      const enrollmentKey = `${studentId}_${lecId}_${courseCode}_${year}_${semester}`;
+      await set(`enrollments/${k(enrollmentKey)}`, {
+        studentId: studentId,
+        lecId: lecId,
+        courseCode: courseCode,
+        courseName: courseName,
+        year: year,
+        semester: semester,
+        enrolledAt: Date.now(),
+        active: true
+      });
+    },
+    
+    getStudentEnrollments: async (studentId, lecId = null) => {
+      const all = await arr('enrollments');
+      let filtered = all.filter(e => e.studentId === studentId && e.active === true);
+      if (lecId) {
+        filtered = filtered.filter(e => e.lecId === lecId);
+      }
+      return filtered;
+    },
+    
+    getAll: async () => {
+      return await arr('enrollments');
+    },
+    
+    isEnrolled: async (studentId, lecId, courseCode) => {
+      const current = getCurrentAcademicPeriod();
+      const all = await arr('enrollments');
+      return all.some(e =>
+        e.studentId === studentId &&
+        e.lecId === lecId &&
+        e.courseCode === courseCode &&
+        e.year === current.year &&
+        e.semester === current.semester &&
+        e.active === true
+      );
+    },
+    
+    delete: async (enrollmentKey) => {
+      await remove(`enrollments/${k(enrollmentKey)}`);
+    }
+  };
+
+  /* ══ COURSE MANAGEMENT ══ */
+  const COURSE = {
+    getAllForLecturer: async (lecId) => {
+      if (!lecId) return [];
+      const path = `courses/${k(lecId)}`;
+      const data = await get(path);
+      if (!data) return [];
+      return Object.values(data);
+    },
+    
+    get: async (lecId, courseCode, year, semester) => {
+      if (!lecId || !courseCode) return null;
+      const all = await COURSE.getAllForLecturer(lecId);
+      return all.find(c => c.code === courseCode && c.year === year && c.semester === semester) || null;
+    },
+    
+    set: async (lecId, courseCode, year, semester, data) => {
+      if (!lecId) throw new Error('Cannot save course without lecId');
+      const cleanLecId = k(lecId);
+      const cleanCode = normalizeCourseCode(courseCode);
+      const key = `${cleanLecId}_${cleanCode}_${year}_${semester}`;
+      const path = `courses/${cleanLecId}/${key}`;
+      
+      const courseData = { 
+        ...data, 
+        code: courseCode, 
+        year: year, 
+        semester: semester,
+        lecId: lecId,
+        updatedAt: Date.now()
+      };
+      if (!courseData.createdAt) courseData.createdAt = Date.now();
+      return await set(path, courseData);
+    },
+    
+    update: async (lecId, courseCode, year, semester, data) => {
+      if (!lecId) throw new Error('Cannot update course without lecId');
+      const cleanLecId = k(lecId);
+      const cleanCode = normalizeCourseCode(courseCode);
+      const key = `${cleanLecId}_${cleanCode}_${year}_${semester}`;
+      const path = `courses/${cleanLecId}/${key}`;
+      
+      const cleanData = {};
+      for (const [k, v] of Object.entries(data)) {
+        if (v !== undefined && v !== null) cleanData[k] = v;
+      }
+      cleanData.updatedAt = Date.now();
+      return await update(path, cleanData);
+    },
+    
+    deleteCourse: async (lecId, courseCode, year, semester) => {
+      if (!lecId) throw new Error('Cannot delete course without lecId');
+      const cleanLecId = k(lecId);
+      const cleanCode = normalizeCourseCode(courseCode);
+      const key = `${cleanLecId}_${cleanCode}_${year}_${semester}`;
+      const path = `courses/${cleanLecId}/${key}`;
+      return await remove(path);
+    },
+    
+    disableCourse: async (lecId, courseCode, year, semester) => {
+      await COURSE.update(lecId, courseCode, year, semester, { active: false, disabledAt: Date.now() });
+    },
+    
+    enableCourse: async (lecId, courseCode, year, semester) => {
+      await COURSE.update(lecId, courseCode, year, semester, { active: true, enabledAt: Date.now() });
+    },
+  };
+
+  /* ══ SESSION MANAGEMENT ══ */
+  const SESSION = {
+    get:     id         => get(`sessions/${id}`),
+    set:     (id,d)     => set(`sessions/${id}`,d),
+    update:  (id,d)     => update(`sessions/${id}`,d),
+    delete:  id         => remove(`sessions/${id}`),
+    getAll:  ()         => arr('sessions'),
+    
+    byLec:   async uid  => { 
+      if (!uid) return [];
+      const a = await arr('sessions');
+      return a.filter(s => s.lecFbId === uid);
+    },
+    
+    getStudentSessions: async (studentId, lecId = null) => {
+      const all = await arr('sessions');
+      const studentSessions = [];
+      for (const session of all) {
+        if (lecId && session.lecFbId !== lecId) continue;
+        const records = session.records ? Object.values(session.records) : [];
+        if (records.some(r => r.studentId && r.studentId.toUpperCase() === studentId.toUpperCase())) {
+          studentSessions.push(session);
+        }
+      }
+      return studentSessions;
+    },
+    
+    pushRecord:    (id,r)  => push(`sessions/${id}/records`,r),
+    pushBlocked:   (id,b)  => push(`sessions/${id}/blocked`,b),
+    addDevice:     (id,fp) => set(`sessions/${id}/devs/${k(fp)}`,true),
+    addSid:        (id,s)  => set(`sessions/${id}/sids/${k(btoa(s.toUpperCase()))}`,s.toUpperCase()),
+    hasDevice:     async(id,fp)=>!!(await get(`sessions/${id}/devs/${k(fp)}`)),
+    hasSid:        async(id,s) =>!!(await get(`sessions/${id}/sids/${k(btoa(s.toUpperCase()))}`)),
+    getRecords:    async id => { const v=await get(`sessions/${id}/records`);return v?Object.values(v):[]; },
+    getBlocked:    async id => { const v=await get(`sessions/${id}/blocked`);return v?Object.values(v):[]; },
+    listenRecords: (id,cb) => listen(`sessions/${id}/records`, v=>cb(v&&typeof v==='object'?Object.values(v):[])),
+    listenBlocked: (id,cb) => listen(`sessions/${id}/blocked`, v=>cb(v&&typeof v==='object'?Object.values(v):[])),
+    listenActiveSessions: (lecId, cb) => listen('sessions', (data) => {
+      if (!data) return cb([]);
+      const sessions = Object.values(data);
+      if (lecId) {
+        cb(sessions.filter(s => s.active === true && s.lecFbId === lecId));
+      } else {
+        cb(sessions.filter(s => s.active === true));
+      }
+    }),
+  };
+
+  /* ══ BACKUP ══ */
+  const BACKUP = {
+    save: async (backupId, data) => {
+      const sanitizedId = String(backupId).replace(/[.#$[\]/]/g, '_');
+      await set(`backups/${sanitizedId}`, data);
+    },
+    get: async (backupId) => {
+      const sanitizedId = String(backupId).replace(/[.#$[\]/]/g, '_');
+      return await get(`backups/${sanitizedId}`);
+    },
+    getAll: async () => {
+      const data = await get('backups');
+      if (!data) return [];
+      return Object.entries(data).map(([id, backup]) => ({
+        id: id,
+        ...backup
+      }));
+    },
+    delete: async (backupId) => {
+      const sanitizedId = String(backupId).replace(/[.#$[\]/]/g, '_');
+      await remove(`backups/${sanitizedId}`);
+    }
+  };
+
+  /* ══ DEVICE REGISTRATION TRACKING ══ */
+  const DEVICE_REGISTRATION = {
+    _sanitizeFingerprint: (fp) => {
+      let sanitized = String(fp).replace(/[.#$[\]/]/g, '_');
+      if (!isNaN(parseInt(sanitized[0]))) {
+        sanitized = 'd_' + sanitized;
+      }
+      return sanitized;
+    },
+
+    isDeviceRegistered: async (deviceFingerprint) => {
+      const allStudents = await STUDENTS.getAll();
+      const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+      for (const student of allStudents) {
+        if (student.devices && student.devices[sanitizedFp]) {
+          return { registered: true, studentId: student.studentId, studentName: student.name };
+        }
+      }
+      return { registered: false };
+    },
+    
+    registerDevice: async (studentId, deviceFingerprint, deviceInfo) => {
+      const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+      const student = await STUDENTS.get(studentId);
+      if (!student) throw new Error('Student not found');
+      
+      let devices = student.devices || {};
+      devices[sanitizedFp] = {
+        registeredAt: Date.now(),
+        lastUsed: Date.now(),
+        userAgent: deviceInfo.userAgent,
+        deviceName: deviceInfo.deviceName || navigator.platform || 'Unknown',
+        isPrimary: true,
+        originalFingerprint: deviceFingerprint
+      };
+      
+      await STUDENTS.update(studentId, {
+        devices: devices,
+        primaryDeviceFingerprint: sanitizedFp,
+        lastDeviceCheck: Date.now()
+      });
+    },
+    
+    unregisterDevice: async (studentId, deviceFingerprint = null) => {
+      const student = await STUDENTS.get(studentId);
+      if (!student) return;
+      
+      let devices = student.devices || {};
+      
+      if (deviceFingerprint) {
+        const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+        delete devices[sanitizedFp];
+      } else {
+        devices = {};
+      }
+      
+      await STUDENTS.update(studentId, { 
+        devices: devices,
+        primaryDeviceFingerprint: null,
+        webAuthnCredentialId: null,
+        webAuthnData: null,
+        lastBiometricReset: Date.now(),
+        biometricResetReason: 'device_reset'
+      });
+    },
+    
+    getStudentDevices: async (studentId) => {
+      const student = await STUDENTS.get(studentId);
+      if (!student || !student.devices) return [];
+      return Object.entries(student.devices).map(([fp, info]) => ({
+        fingerprint: fp,
+        ...info
+      }));
+    },
+    
+    updateDeviceLastUsed: async (studentId, deviceFingerprint) => {
+      const student = await STUDENTS.get(studentId);
+      if (!student || !student.devices) return;
+      
+      const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+      if (student.devices[sanitizedFp]) {
+        student.devices[sanitizedFp].lastUsed = Date.now();
+        await STUDENTS.update(studentId, {
+          devices: student.devices
+        });
+      }
+    }
+  };
+
+  /* ══ STUDENTS ══ */
+  const STUDENTS = {
+    getAll:       ()          => arr('students'),
+    get:          id          => get(`students/${k(id)}`),
+    set:          (id,d)      => set(`students/${k(id)}`, d),
+    update:       (id,d)      => update(`students/${k(id)}`, d),
+    delete:       id          => remove(`students/${k(id)}`),
+    
+    byEmail:      async e     => { const a = await arr('students'); return a.find(s => s.email === e) || null; },
+    byStudentId:  async id    => {
+      const a = await arr('students');
+      const upperId = id.toUpperCase();
+      return a.find(s => s.studentId && s.studentId.toUpperCase() === upperId) || null;
+    },
+    
+    addDevice:    (id, deviceFingerprint) => {
+      const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+      return set(`students/${k(id)}/devices/${sanitizedFp}`, {
+        registeredAt: Date.now(),
+        lastUsed: Date.now(),
+        userAgent: navigator.userAgent
+      });
+    },
+    hasDevice:    async(id, deviceFingerprint) => {
+      const sanitizedFp = DEVICE_REGISTRATION._sanitizeFingerprint(deviceFingerprint);
+      return !!(await get(`students/${k(id)}/devices/${sanitizedFp}`));
+    },
+    
+    registerWebAuthn: async (id, credentialId, clientDataJSON, attestationObject) => update(`students/${k(id)}`, {
+      webAuthnCredentialId: credentialId,
+      webAuthnRegisteredAt: Date.now(),
+      webAuthnRegistered: true
+    }),
+    
+    hasWebAuthn: async id => {
+      const student = await get(`students/${k(id)}`);
+      return !!(student && student.webAuthnCredentialId);
+    },
+    
+    updateWebAuthnLastUse: async (id) => update(`students/${k(id)}`, { lastWebAuthnUse: Date.now() }),
+    updateBiometricUse: async (id, method) => update(`students/${k(id)}`, {
+      lastBiometricUse: Date.now(),
+      lastVerificationMethod: method
+    }),
+    updatePassword: async (id, newHash) => update(`students/${k(id)}`, { pwHash: newHash }),
+    setActive:     async (id, active) => update(`students/${k(id)}`, { active: active, lastActiveAt: Date.now() }),
+    
+    getAttendanceStats: async (studentId, lecId = null, courseCode = null) => {
+      const allSessions = await SESSION.getAll();
+      
+      let totalPresent = 0;
+      let totalSessions = 0;
+      const courses = new Map();
+      
+      for (const session of allSessions) {
+        if (lecId && session.lecFbId !== lecId) continue;
+        if (courseCode && session.courseCode !== courseCode) continue;
+        
+        const records = session.records ? Object.values(session.records) : [];
+        const attended = records.some(r => r.studentId && r.studentId.toUpperCase() === studentId.toUpperCase());
+        
+        if (attended || session.active === false) {
+          const courseNorm = session.courseCode;
+          if (!courses.has(courseNorm)) {
+            courses.set(courseNorm, {
+              courseCode: session.courseCode,
+              courseName: session.courseName,
+              totalSessions: 0,
+              attended: 0
+            });
+          }
+          
+          const course = courses.get(courseNorm);
+          course.totalSessions++;
+          totalSessions++;
+          
+          if (attended) {
+            course.attended++;
+            totalPresent++;
+          }
+          
+          courses.set(courseNorm, course);
+        }
+      }
+      
+      const coursesArray = Array.from(courses.values()).map(c => ({
+        ...c,
+        percentage: c.totalSessions > 0 ? Math.round((c.attended / c.totalSessions) * 100) : 0
+      }));
+      
+      return {
+        totalSessions,
+        totalPresent,
+        attendancePercentage: totalSessions > 0 ? Math.round((totalPresent / totalSessions) * 100) : 0,
+        courses: coursesArray
+      };
+    },
+  };
+
+  /* ══ RESET TOKENS (Password Reset) ══ */
+  const RESET = {
+    set:    (email,d)  => set(`resets/${k(email)}`,d),
+    get:    email      => get(`resets/${k(email)}`),
+    delete: email      => remove(`resets/${k(email)}`),
+  };
+
+  /* ══ BIOMETRIC RESET REQUESTS (Passkey Reset) ══ */
+  const BIOMETRIC_RESET = {
+    get: async (token) => {
+      const all = await get('biometricResets');
+      if (!all) return null;
+      return all[token] || null;
+    },
+    set: async (token, data) => {
+      await set(`biometricResets/${token}`, data);
+    },
+    update: async (token, data) => {
+      await update(`biometricResets/${token}`, data);
+    },
+    getAllForStudent: async (studentId) => {
+      const all = await get('biometricResets');
+      if (!all) return [];
+      return Object.values(all).filter(r => r.studentId === studentId);
+    },
+    getAllForLecturer: async (lecturerId) => {
+      const all = await get('biometricResets');
+      if (!all) return [];
+      return Object.values(all).filter(r => r.lecturerId === lecturerId);
+    },
+    delete: async (token) => {
+      await remove(`biometricResets/${token}`);
+    }
+  };
+
+  /* ══ STATISTICS ══ */
+  const STATS = {
+    incrementCheckins: async () => {
+      const today = new Date().toISOString().split('T')[0];
+      const stats = await get('stats') || {};
+      stats.totalCheckins = (stats.totalCheckins || 0) + 1;
+      stats.dailyCheckins = stats.dailyCheckins || {};
+      stats.dailyCheckins[today] = (stats.dailyCheckins[today] || 0) + 1;
+      stats.lastUpdated = Date.now();
+      await set('stats', stats);
+    },
+    getStats: async () => get('stats'),
+  };
+
+  /* ══ MESSAGES ══ */
+  const MESSAGES = {
+    // Course messages
+    getCourseMessages: async (lecId, courseCode, year, semester) => {
+      const path = `messages/course/${lecId}/${courseCode}_${year}_${semester}`;
+      const data = await get(path);
+      if (!data) return [];
+      return Object.values(data).sort((a, b) => b.timestamp - a.timestamp);
+    },
+    
+    sendCourseMessage: async (lecId, courseCode, year, semester, senderId, senderName, message, isAnnouncement = false) => {
+      const messageId = Date.now().toString() + Math.random().toString(36).substr(2, 4);
+      const path = `messages/course/${lecId}/${courseCode}_${year}_${semester}/${messageId}`;
+      const messageData = {
+        id: messageId,
+        senderId: senderId,
+        senderName: senderName,
+        message: message,
+        timestamp: Date.now(),
+        isAnnouncement: isAnnouncement,
+        replies: []
+      };
+      await set(path, messageData);
+      return messageData;
+    },
+    
+    addReply: async (lecId, courseCode, year, semester, messageId, senderId, senderName, replyText) => {
+      const path = `messages/course/${lecId}/${courseCode}_${year}_${semester}/${messageId}`;
+      const message = await get(path);
+      if (message) {
+        const replies = message.replies || [];
+        replies.push({
+          senderId: senderId,
+          senderName: senderName,
+          message: replyText,
+          timestamp: Date.now()
+        });
+        await update(path, { replies: replies });
+        return true;
+      }
+      return false;
+    },
+    
+    // Department messages (for admins)
+    getDepartmentMessages: async (department) => {
+      const path = `messages/department/${department}`;
+      const data = await get(path);
+      if (!data) return [];
+      return Object.values(data).sort((a, b) => b.timestamp - a.timestamp);
+    },
+    
+    sendDepartmentMessage: async (department, senderId, senderName, senderRole, message) => {
+      const messageId = Date.now().toString() + Math.random().toString(36).substr(2, 4);
+      const path = `messages/department/${department}/${messageId}`;
+      const messageData = {
+        id: messageId,
+        senderId: senderId,
+        senderName: senderName,
+        senderRole: senderRole,
+        message: message,
+        timestamp: Date.now(),
+        replies: []
+      };
+      await set(path, messageData);
+      return messageData;
+    }
+  };
+
+  /* ══ EXPORT ══ */
+  return {
+    // Core operations
+    get,
+    set,
+    update,
+    remove,
+    push,
+    arr,
+    listen,
+    
+    // Collections
+    SA,
+    CA,
+    LEC,
+    TA,
+    UID,
+    ENROLLMENT,
+    COURSE,
+    SESSION,
+    BACKUP,
+    STUDENTS,
+    RESET,
+    STATS,
+    BIOMETRIC_RESET,
+    DEVICE_REGISTRATION,
+    MESSAGES,
+    
+    // Helpers
+    getCurrentAcademicPeriod
+  };
+})();
